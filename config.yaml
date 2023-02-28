@@ -1,0 +1,19 @@
+rewrites:
+  # converts internal metrics to spanmetricsprocessor-like metrics
+  # https://pkg.go.dev/github.com/open-telemetry/opentelemetry-collector-contrib/processor/spanmetricsprocessor
+  - name: my-app-spanprocessor
+    for: service_name=~"my-app"
+    wrap:
+      match: ".*_bucket.*"
+      with: 1000 * unwrapped_query
+    rename-metrics:
+      calls_total: http_server_requests_seconds_count
+      latency_bucket: http_server_requests_seconds_bucket
+    rename-labels:
+      service_name: service
+      operation: uri
+    rewrite-matchers:
+      - from: '{status_code=~"my-app"}'
+        to: '{outcome="SERVER_ERROR"}'
+    delete-labels:
+      - span_kind
