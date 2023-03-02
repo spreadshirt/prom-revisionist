@@ -17,3 +17,5 @@ rewrites:
         to: '{outcome="SERVER_ERROR"}'
     delete-labels:
       - span_kind
+    add-matchers:
+      - '{cluster="my-cluster"}'

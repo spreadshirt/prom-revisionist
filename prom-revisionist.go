@@ -239,7 +239,9 @@ type RewriteConfig struct {
 		FromRaw string          `yaml:"from"`
 		ToRaw   string          `yaml:"to"`
 	} `yaml:"rewrite-matchers"`
-	DeleteLabels []string `yaml:"delete-labels"`
+	DeleteLabels   []string          `yaml:"delete-labels"`
+	AddMatchers    []*labels.Matcher `yaml:"-"`
+	AddMatchersRaw []string          `yaml:"add-matchers"`
 }
 
 func parseConfig(path string) ([]*Revisionist, error) {
@@ -296,6 +298,20 @@ func parseConfig(path string) ([]*Revisionist, error) {
 			}
 
 			config.Rewrites[i].RewriteMatchers[j].To = matchers[0]
+		}
+
+		config.Rewrites[i].AddMatchers = make([]*labels.Matcher, 0, len(rewrite.AddMatchersRaw))
+		for j, matcher := range rewrite.AddMatchersRaw {
+			matchers, err := parser.ParseMetricSelector(matcher)
+			if err != nil {
+				return nil, fmt.Errorf("invalid rewrites[%d].add-matchers[%d] label matcher %q: %w", i, j, matcher, err)
+			}
+
+			if len(matchers) != 1 {
+				return nil, fmt.Errorf("invalid rewrites[%d].rewrite-matchers[%d] label matcher %q: must contain only one label matcher", i, j, matcher)
+			}
+
+			config.Rewrites[i].AddMatchers = append(config.Rewrites[i].AddMatchers, matchers[0])
 		}
 
 		revisionists = append(revisionists, &Revisionist{config: config.Rewrites[i]})
@@ -413,6 +429,11 @@ func (r *Revisionist) Visit(node parser.Node, path []parser.Node) (parser.Visito
 
 			matchers = append(matchers, label)
 		}
+
+		for _, matcher := range r.config.AddMatchers {
+			matchers = append(matchers, matcher)
+		}
+
 		val.LabelMatchers = matchers
 	}
 	return r, nil
