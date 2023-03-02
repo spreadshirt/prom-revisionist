@@ -42,7 +42,12 @@ func main() {
 
 		fmt.Println("before:", expr.Pretty(0))
 
-		err = parser.Walk(revisionists[0], expr, nil)
+		rewritten, _, err := rewrite(revisionists, os.Args[1])
+		if err != nil {
+			log.Fatal(err)
+		}
+
+		expr, err = parser.ParseExpr(rewritten)
 		if err != nil {
 			log.Fatal(err)
 		}
@@ -78,29 +83,23 @@ func main() {
 			return
 		}
 
+		var rev *Revisionist
 		wasRewrite := false
 		if len(req.PostForm) > 0 {
 			query := req.PostForm.Get("query")
 			if query != "" {
-				expr, err := parser.ParseExpr(query)
-				if err != nil {
-					log.Printf("invalid query %q: %s", query, err)
-				} else {
-					before := expr.String()
-					// TODO: support multiple revisionists!
-					err = parser.Walk(revisionists[0], expr, nil)
-					if err != nil {
-						log.Printf("could not rewrite: %s", err)
-					} else {
-						expr, err = revisionists[0].WrapExpr(expr)
-						if err != nil {
-							log.Printf("could not wrap: %s", err)
-						}
-						log.Printf("rewriting!\n%s\n=>\n%s", before, expr.String())
-						req.PostForm.Set("query", expr.String())
+				before := query
 
-						wasRewrite = true
-					}
+				query, rev, err = rewrite(revisionists, query)
+				if err != nil {
+					log.Printf("could not rewrite: %s", err)
+				}
+
+				if rev != nil {
+					log.Printf("rewriting!\n%s\n=>\n%s", before, query)
+
+					req.PostForm.Set("query", query)
+					wasRewrite = true
 				}
 			}
 
@@ -146,8 +145,6 @@ func main() {
 
 		var in io.Reader = resp.Body
 		if wasRewrite {
-			log.Println("rewriting body")
-
 			buf := new(bytes.Buffer)
 			_, err = io.Copy(buf, resp.Body)
 			if err != nil {
@@ -155,12 +152,11 @@ func main() {
 				return
 			}
 
-			if strings.Contains(buf.String(), `"service"`) {
-				log.Println("rewriting service in response")
+			res := buf.String()
+			for from, to := range rev.config.RenameLabels {
+				// TODO: rewrite by using streaming in some way
+				res = strings.Replace(res, `"`+to+`"`, `"`+from+`"`, -1)
 			}
-			// TODO: rewrite by using streaming in some way
-			res := strings.Replace(buf.String(), `"service"`, `"service_name"`, -1)
-			res = strings.Replace(res, `"uri"`, `"operation"`, -1)
 
 			buf.Reset()
 			_, err = buf.WriteString(res)
@@ -215,6 +211,36 @@ func main() {
 
 	log.Printf("Listening on http://%s", config.Addr)
 	log.Fatal(http.ListenAndServe(config.Addr, nil))
+}
+
+func rewrite(revisionists []*Revisionist, query string) (string, *Revisionist, error) {
+	expr, err := parser.ParseExpr(query)
+	if err != nil {
+		return query, nil, fmt.Errorf("invalid query: %w", err)
+	}
+
+	for _, rev := range revisionists {
+		if !rev.ShouldProcess(expr) {
+			log.Printf("%s does not match %q", rev.config.For, query)
+			continue
+		}
+
+		log.Printf("%s matches %q", rev.config.For, query)
+
+		err = parser.Walk(rev, expr, nil)
+		if err != nil {
+			return query, nil, fmt.Errorf("walk: %w", err)
+		}
+
+		expr, err = rev.WrapExpr(expr)
+		if err != nil {
+			return query, nil, fmt.Errorf("wrap: %w", err)
+		}
+
+		return expr.Pretty(0), rev, nil
+	}
+
+	return query, nil, nil
 }
 
 type Config struct {
@@ -359,14 +385,9 @@ func (r *Revisionist) ShouldProcess(expr parser.Expr) bool {
 }
 
 func (r *Revisionist) WrapExpr(expr parser.Expr) (parser.Expr, error) {
-	log.Printf("WRAP? %v %q", r.config.Wrap.Match, r.config.Wrap.MatchRaw)
-	log.Println(r.config.Wrap.Match.MatchString(expr.Pretty(0)), expr.Pretty(0))
-
 	if r.config.Wrap.Match == nil || !r.config.Wrap.Match.MatchString(expr.Pretty(0)) {
 		return expr, nil
 	}
-
-	log.Println("wrapping!")
 
 	wrapped, err := parser.ParseExpr(r.config.Wrap.WithRaw)
 	if err != nil {
