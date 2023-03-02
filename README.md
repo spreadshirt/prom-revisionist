@@ -1,4 +1,4 @@
-# prom-revisonist
+# prom-revisionist
 
 Prometheus proxy that rewrites queries on the fly, passing them on to another Prometheus instance.
 
@@ -17,7 +17,7 @@ and passes them on to <http://localhost:9090>.
 Alternatively, you can run the pre-built docker image:
 
 ```
-docker run -it --rm -v $PWD/config.yaml:/config.yaml -p 19090:19090 ghcr.io/spreadshirt/prom-revisonist:0.0.1-alpha -config /config.yaml
+docker run -it --rm -v $PWD/config.yaml:/config.yaml -p 19090:19090 ghcr.io/spreadshirt/prom-revisionist:0.0.1-alpha2 -config /config.yaml
 ```
 
 ## Configuration
