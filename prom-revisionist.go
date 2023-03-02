@@ -244,6 +244,84 @@ type RewriteConfig struct {
 	AddMatchersRaw []string          `yaml:"add-matchers"`
 }
 
+func RewriteConfigFromString(cfg string) (*RewriteConfig, error) {
+	var config RewriteConfig
+	dec := yaml.NewDecoder(bytes.NewBufferString(cfg))
+	dec.KnownFields(true)
+	err := dec.Decode(&config)
+	if err != nil {
+		return nil, fmt.Errorf("could not parse yaml: %w", err)
+	}
+
+	err = config.Parse()
+	if err != nil {
+		return nil, fmt.Errorf("invalid config: %w", err)
+	}
+
+	return &config, err
+}
+
+func (r *RewriteConfig) Parse() error {
+	var err error
+
+	r.For, err = regexp.Compile(r.ForRaw)
+	if err != nil {
+		return fmt.Errorf("for regexp: %w", err)
+	}
+
+	if r.Wrap.MatchRaw != "" {
+		r.Wrap.Match, err = regexp.Compile(r.Wrap.MatchRaw)
+		if err != nil {
+			return fmt.Errorf("wrap.match regexp: %w", err)
+		}
+
+		r.Wrap.With, err = parser.ParseExpr(r.Wrap.WithRaw)
+		if err != nil {
+			return fmt.Errorf("wrap.with promtheus expr: %w", err)
+		}
+	}
+
+	for j, matcher := range r.RewriteMatchers {
+		matchers, err := parser.ParseMetricSelector(matcher.FromRaw)
+		if err != nil {
+			return fmt.Errorf("rewrite-matchers[%d].from label matcher %q: %w", j, matcher.FromRaw, err)
+		}
+
+		if len(matchers) != 1 {
+			return fmt.Errorf("rewrite-matchers[%d].from label matcher %q: must contain only one label matcher", j, matcher.FromRaw)
+		}
+
+		r.RewriteMatchers[j].From = matchers[0]
+
+		matchers, err = parser.ParseMetricSelector(matcher.ToRaw)
+		if err != nil {
+			return fmt.Errorf("rewrite-matchers[%d].to label matcher %q: %w", j, matcher.ToRaw, err)
+		}
+
+		if len(matchers) != 1 {
+			return fmt.Errorf("rewrite-matchers[%d].to label matcher %q: must contain only one label matcher", j, matcher.ToRaw)
+		}
+
+		r.RewriteMatchers[j].To = matchers[0]
+	}
+
+	r.AddMatchers = make([]*labels.Matcher, 0, len(r.AddMatchersRaw))
+	for j, matcher := range r.AddMatchersRaw {
+		matchers, err := parser.ParseMetricSelector(matcher)
+		if err != nil {
+			return fmt.Errorf("add-matchers[%d] label matcher %q: %w", j, matcher, err)
+		}
+
+		if len(matchers) != 1 {
+			return fmt.Errorf("rewrite-matchers[%d] label matcher %q: must contain only one label matcher", j, matcher)
+		}
+
+		r.AddMatchers = append(r.AddMatchers, matchers[0])
+	}
+
+	return nil
+}
+
 func parseConfig(path string) ([]*Revisionist, error) {
 	f, err := os.Open(path)
 	if err != nil {
@@ -261,67 +339,19 @@ func parseConfig(path string) ([]*Revisionist, error) {
 
 	revisionists := make([]*Revisionist, 0, len(config.Rewrites))
 	for i, rewrite := range config.Rewrites {
-		config.Rewrites[i].For, err = regexp.Compile(rewrite.ForRaw)
+		err := rewrite.Parse()
 		if err != nil {
-			return nil, fmt.Errorf("invalid rewrites[%d].for regexp: %w", i, err)
+			return nil, fmt.Errorf("invalid rewrites[%d].%w", i, err)
 		}
 
-		config.Rewrites[i].Wrap.Match, err = regexp.Compile(rewrite.Wrap.MatchRaw)
-		if err != nil {
-			return nil, fmt.Errorf("invalid rewrites[%d].wrap.match regexp: %w", i, err)
-		}
-
-		config.Rewrites[i].Wrap.With, err = parser.ParseExpr(rewrite.Wrap.WithRaw)
-		if err != nil {
-			return nil, fmt.Errorf("invalid rewrites[%d].wrap.with promtheus expr: %w", i, err)
-		}
-
-		for j, matcher := range rewrite.RewriteMatchers {
-			matchers, err := parser.ParseMetricSelector(matcher.FromRaw)
-			if err != nil {
-				return nil, fmt.Errorf("invalid rewrites[%d].rewrite-matchers[%d].from label matcher %q: %w", i, j, matcher.FromRaw, err)
-			}
-
-			if len(matchers) != 1 {
-				return nil, fmt.Errorf("invalid rewrites[%d].rewrite-matchers[%d].from label matcher %q: must contain only one label matcher", i, j, matcher.FromRaw)
-			}
-
-			config.Rewrites[i].RewriteMatchers[j].From = matchers[0]
-
-			matchers, err = parser.ParseMetricSelector(matcher.ToRaw)
-			if err != nil {
-				return nil, fmt.Errorf("invalid rewrites[%d].rewrite-matchers[%d].to label matcher %q: %w", i, j, matcher.ToRaw, err)
-			}
-
-			if len(matchers) != 1 {
-				return nil, fmt.Errorf("invalid rewrites[%d].rewrite-matchers[%d].to label matcher %q: must contain only one label matcher", i, j, matcher.ToRaw)
-			}
-
-			config.Rewrites[i].RewriteMatchers[j].To = matchers[0]
-		}
-
-		config.Rewrites[i].AddMatchers = make([]*labels.Matcher, 0, len(rewrite.AddMatchersRaw))
-		for j, matcher := range rewrite.AddMatchersRaw {
-			matchers, err := parser.ParseMetricSelector(matcher)
-			if err != nil {
-				return nil, fmt.Errorf("invalid rewrites[%d].add-matchers[%d] label matcher %q: %w", i, j, matcher, err)
-			}
-
-			if len(matchers) != 1 {
-				return nil, fmt.Errorf("invalid rewrites[%d].rewrite-matchers[%d] label matcher %q: must contain only one label matcher", i, j, matcher)
-			}
-
-			config.Rewrites[i].AddMatchers = append(config.Rewrites[i].AddMatchers, matchers[0])
-		}
-
-		revisionists = append(revisionists, &Revisionist{config: config.Rewrites[i]})
+		revisionists = append(revisionists, &Revisionist{config: &rewrite})
 	}
 
 	return revisionists, nil
 }
 
 type Revisionist struct {
-	config RewriteConfig
+	config *RewriteConfig
 }
 
 func (r *Revisionist) ShouldProcess(expr parser.Expr) bool {
