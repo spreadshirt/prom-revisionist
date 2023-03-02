@@ -24,7 +24,7 @@ var config struct {
 }
 
 func main() {
-	flag.StringVar(&config.Addr, "addr", "localhost:19090", "Address to listen on")
+	flag.StringVar(&config.Addr, "addr", "0.0.0.0:19090", "Address to listen on")
 	flag.StringVar(&config.UpstreamURL, "upstream", "http://localhost:9090", "Upstream Prometheus url")
 	flag.StringVar(&config.Config, "config", "config.yaml", "Config file specifying the rewrites")
 	flag.Parse()
