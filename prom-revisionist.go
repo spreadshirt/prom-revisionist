@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"compress/gzip"
 	"compress/zlib"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"io"
@@ -12,7 +13,6 @@ import (
 	"net/url"
 	"os"
 	"regexp"
-	"strings"
 
 	"github.com/prometheus/prometheus/model/labels"
 	"github.com/prometheus/prometheus/promql/parser"
@@ -196,27 +196,30 @@ func main() {
 				}
 			}
 
-			buf := new(bytes.Buffer)
-			_, err = io.Copy(buf, in)
-			if err != nil {
-				log.Printf("could not write body: %s", err)
+			dec := json.NewDecoder(in)
+			tw := NewTokenWriter(out, dec)
+			token, err := dec.Token()
+			for err == nil {
+				switch tok := token.(type) {
+				case string:
+					replace, ok := rev.config.RenameLabelsReverse[tok]
+					if ok {
+						token = replace
+					}
+				}
+				err = tw.Write(token)
+				if err != nil {
+					break
+				}
+
+				token, err = dec.Token()
+			}
+			if err != nil && err != io.EOF {
+				log.Printf("could not decode response: %s", err)
 				return
 			}
 
-			res := buf.String()
-			for from, to := range rev.config.RenameLabels {
-				// TODO: rewrite by using streaming in some way
-				res = strings.Replace(res, `"`+to+`"`, `"`+from+`"`, -1)
-			}
-
-			buf.Reset()
-			_, err = buf.WriteString(res)
-			if err != nil {
-				log.Printf("could not rewrite: %s", err)
-				return
-			}
-
-			in = buf
+			return
 		}
 
 		_, err = io.Copy(out, in)
@@ -308,9 +311,10 @@ type RewriteConfig struct {
 		MatchRaw string         `yaml:"match"`
 		WithRaw  string         `yaml:"with"`
 	} `yaml:"wrap"`
-	RenameMetrics   map[string]string `yaml:"rename-metrics"`
-	RenameLabels    map[string]string `yaml:"rename-labels"`
-	RewriteMatchers []struct {
+	RenameMetrics       map[string]string `yaml:"rename-metrics"`
+	RenameLabels        map[string]string `yaml:"rename-labels"`
+	RenameLabelsReverse map[string]string `yaml:"-"`
+	RewriteMatchers     []struct {
 		From    *labels.Matcher `yaml:"-"`
 		To      *labels.Matcher `yaml:"-"`
 		FromRaw string          `yaml:"from"`
@@ -356,6 +360,12 @@ func (r *RewriteConfig) Parse() error {
 		if err != nil {
 			return fmt.Errorf("wrap.with promtheus expr: %w", err)
 		}
+	}
+
+	// reverse label renames to easily convert them back in the response
+	r.RenameLabelsReverse = make(map[string]string, len(r.RenameLabels))
+	for key, val := range r.RenameLabels {
+		r.RenameLabelsReverse[val] = key
 	}
 
 	for j, matcher := range r.RewriteMatchers {
