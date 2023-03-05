@@ -2,6 +2,8 @@ package main
 
 import (
 	"bytes"
+	"compress/gzip"
+	"compress/zlib"
 	"flag"
 	"fmt"
 	"io"
@@ -134,10 +136,6 @@ func main() {
 			return
 		}
 		proxyReq.Header = req.Header
-		if wasRewrite {
-			// TODO: allow keeping gzip and other encodings (handle them transparently)
-			proxyReq.Header.Del("Accept-Encoding")
-		}
 
 		resp, err := http.DefaultClient.Do(proxyReq)
 		if err != nil {
@@ -147,7 +145,13 @@ func main() {
 		}
 		defer resp.Body.Close()
 
+		contentEncoding := resp.Header.Get("Content-Encoding")
 		for name, vals := range resp.Header {
+			if name == "Content-Length" && contentEncoding != "" {
+				// recompression changes the length, skip
+				continue
+			}
+
 			for _, val := range vals {
 				w.Header().Add(name, val)
 			}
@@ -162,8 +166,38 @@ func main() {
 
 		var in io.Reader = resp.Body
 		if wasRewrite {
+			if contentEncoding != "" {
+				switch contentEncoding {
+				case "gzip":
+					in, err = gzip.NewReader(in)
+					if err != nil {
+						log.Printf("could not create gzip reader: %s", err)
+						return
+					}
+
+					zw := gzip.NewWriter(out)
+					defer zw.Close()
+
+					out = zw
+				case "deflate":
+					in, err = zlib.NewReader(in)
+					if err != nil {
+						log.Printf("could not create deflate reader: %s", err)
+						return
+					}
+
+					zw := zlib.NewWriter(out)
+					defer zw.Close()
+
+					out = zw
+				default:
+					log.Printf("unhandled compression %q", contentEncoding)
+					return
+				}
+			}
+
 			buf := new(bytes.Buffer)
-			_, err = io.Copy(buf, resp.Body)
+			_, err = io.Copy(buf, in)
 			if err != nil {
 				log.Printf("could not write body: %s", err)
 				return
