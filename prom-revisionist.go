@@ -109,7 +109,24 @@ func main() {
 		u := req.URL
 		u.Scheme = upstreamURL.Scheme
 		u.Host = upstreamURL.Host
-		// TODO: modify query in url.Query/url.RawQuery
+		if u.Query().Get("query") != "" {
+			query := u.Query().Get("query")
+			before := query
+
+			query, rev, err = rewrite(revisionists, query)
+			if err != nil {
+				log.Printf("could not rewrite: %s", err)
+			}
+
+			if rev != nil {
+				log.Printf("rewriting!\n%s\n=>\n%s", before, query)
+
+				params := u.Query()
+				params.Set("query", query)
+				u.RawQuery = params.Encode()
+				wasRewrite = true
+			}
+		}
 		proxyReq, err := http.NewRequest(req.Method, u.String(), bytes.NewBuffer(body))
 		if err != nil {
 			log.Printf("failed to created request: %s", err)
