@@ -2,6 +2,9 @@ package main
 
 import (
 	"bytes"
+	"compress/gzip"
+	"compress/zlib"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"io"
@@ -10,7 +13,6 @@ import (
 	"net/url"
 	"os"
 	"regexp"
-	"strings"
 
 	"github.com/prometheus/prometheus/model/labels"
 	"github.com/prometheus/prometheus/promql/parser"
@@ -109,7 +111,24 @@ func main() {
 		u := req.URL
 		u.Scheme = upstreamURL.Scheme
 		u.Host = upstreamURL.Host
-		// TODO: modify query in url.Query/url.RawQuery
+		if u.Query().Get("query") != "" {
+			query := u.Query().Get("query")
+			before := query
+
+			query, rev, err = rewrite(revisionists, query)
+			if err != nil {
+				log.Printf("could not rewrite: %s", err)
+			}
+
+			if rev != nil {
+				log.Printf("rewriting!\n%s\n=>\n%s", before, query)
+
+				params := u.Query()
+				params.Set("query", query)
+				u.RawQuery = params.Encode()
+				wasRewrite = true
+			}
+		}
 		proxyReq, err := http.NewRequest(req.Method, u.String(), bytes.NewBuffer(body))
 		if err != nil {
 			log.Printf("failed to created request: %s", err)
@@ -117,10 +136,6 @@ func main() {
 			return
 		}
 		proxyReq.Header = req.Header
-		if wasRewrite {
-			// TODO: allow keeping gzip and other encodings (handle them transparently)
-			proxyReq.Header.Del("Accept-Encoding")
-		}
 
 		resp, err := http.DefaultClient.Do(proxyReq)
 		if err != nil {
@@ -130,7 +145,13 @@ func main() {
 		}
 		defer resp.Body.Close()
 
+		contentEncoding := resp.Header.Get("Content-Encoding")
 		for name, vals := range resp.Header {
+			if name == "Content-Length" && contentEncoding != "" {
+				// recompression changes the length, skip
+				continue
+			}
+
 			for _, val := range vals {
 				w.Header().Add(name, val)
 			}
@@ -145,27 +166,60 @@ func main() {
 
 		var in io.Reader = resp.Body
 		if wasRewrite {
-			buf := new(bytes.Buffer)
-			_, err = io.Copy(buf, resp.Body)
-			if err != nil {
-				log.Printf("could not write body: %s", err)
+			if contentEncoding != "" {
+				switch contentEncoding {
+				case "gzip":
+					in, err = gzip.NewReader(in)
+					if err != nil {
+						log.Printf("could not create gzip reader: %s", err)
+						return
+					}
+
+					zw := gzip.NewWriter(out)
+					defer zw.Close()
+
+					out = zw
+				case "deflate":
+					in, err = zlib.NewReader(in)
+					if err != nil {
+						log.Printf("could not create deflate reader: %s", err)
+						return
+					}
+
+					zw := zlib.NewWriter(out)
+					defer zw.Close()
+
+					out = zw
+				default:
+					log.Printf("unhandled compression %q", contentEncoding)
+					return
+				}
+			}
+
+			dec := json.NewDecoder(in)
+			tw := NewTokenWriter(out, dec)
+			token, err := dec.Token()
+			for err == nil {
+				switch tok := token.(type) {
+				case string:
+					replace, ok := rev.config.RenameLabelsReverse[tok]
+					if ok {
+						token = replace
+					}
+				}
+				err = tw.Write(token)
+				if err != nil {
+					break
+				}
+
+				token, err = dec.Token()
+			}
+			if err != nil && err != io.EOF {
+				log.Printf("could not decode response: %s", err)
 				return
 			}
 
-			res := buf.String()
-			for from, to := range rev.config.RenameLabels {
-				// TODO: rewrite by using streaming in some way
-				res = strings.Replace(res, `"`+to+`"`, `"`+from+`"`, -1)
-			}
-
-			buf.Reset()
-			_, err = buf.WriteString(res)
-			if err != nil {
-				log.Printf("could not rewrite: %s", err)
-				return
-			}
-
-			in = buf
+			return
 		}
 
 		_, err = io.Copy(out, in)
@@ -257,9 +311,10 @@ type RewriteConfig struct {
 		MatchRaw string         `yaml:"match"`
 		WithRaw  string         `yaml:"with"`
 	} `yaml:"wrap"`
-	RenameMetrics   map[string]string `yaml:"rename-metrics"`
-	RenameLabels    map[string]string `yaml:"rename-labels"`
-	RewriteMatchers []struct {
+	RenameMetrics       map[string]string `yaml:"rename-metrics"`
+	RenameLabels        map[string]string `yaml:"rename-labels"`
+	RenameLabelsReverse map[string]string `yaml:"-"`
+	RewriteMatchers     []struct {
 		From    *labels.Matcher `yaml:"-"`
 		To      *labels.Matcher `yaml:"-"`
 		FromRaw string          `yaml:"from"`
@@ -305,6 +360,12 @@ func (r *RewriteConfig) Parse() error {
 		if err != nil {
 			return fmt.Errorf("wrap.with promtheus expr: %w", err)
 		}
+	}
+
+	// reverse label renames to easily convert them back in the response
+	r.RenameLabelsReverse = make(map[string]string, len(r.RenameLabels))
+	for key, val := range r.RenameLabels {
+		r.RenameLabelsReverse[val] = key
 	}
 
 	for j, matcher := range r.RewriteMatchers {
