@@ -137,6 +137,11 @@ func main() {
 		}
 		proxyReq.Header = req.Header
 
+		username, password, ok := req.BasicAuth()
+		if ok {
+			proxyReq.SetBasicAuth(username, password)
+		}
+
 		resp, err := http.DefaultClient.Do(proxyReq)
 		if err != nil {
 			log.Printf("failed to created request: %s", err)
@@ -240,6 +245,11 @@ func main() {
 			return
 		}
 		proxyReq.Header = req.Header
+
+		username, password, ok := req.BasicAuth()
+		if ok {
+			proxyReq.SetBasicAuth(username, password)
+		}
 
 		resp, err := http.DefaultClient.Do(proxyReq)
 		if err != nil {
